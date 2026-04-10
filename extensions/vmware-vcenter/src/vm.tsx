@@ -6,6 +6,7 @@ import {
   VMPowerAction,
   StoragePoliciesSummary,
   VmStoragePolicyComplianceStatus,
+  VmGuestNetworkingInterfacesInfo,
 } from "./api/types";
 import {
   PowerModeIcons,
@@ -20,6 +21,7 @@ import {
   OsIconsMetadata,
 } from "./api/ui";
 import { GetServer, GetSelectedServer, GetServerLocalStorage, CacheMergeVMs } from "./api/function";
+import { Shortcut } from "./api/shortcut";
 import * as React from "react";
 import {
   List,
@@ -33,8 +35,9 @@ import {
   Cache,
   getPreferenceValues,
   open,
+  getApplications,
 } from "@raycast/api";
-import { usePromise } from "@raycast/utils";
+import { runPowerShellScript, usePromise } from "@raycast/utils";
 import ServerView from "./api/ServerView";
 import { vCenter } from "./api/vCenter";
 
@@ -346,6 +349,77 @@ export default function Command(): JSX.Element {
   }
 
   /**
+   * Open an RDP Session.
+   * @param {VmGuestNetworkingInterfacesInfo} infs
+   */
+  async function VMOpenRdp(infs: VmGuestNetworkingInterfacesInfo[]): Promise<void> {
+    showToast({ style: Toast.Style.Animated, title: "Starting RDP Session" });
+
+    // Array with All IP
+    let ips: string[] = [];
+    infs.forEach((inf) => {
+      if (!inf.ip) return;
+      ips = inf.ip.ip_addresses.filter((ip) => ip.ip_address).map((ip) => ip.ip_address);
+    });
+
+    // Get First IPv4
+    const ip = ips.find((ip) =>
+      ip.match(/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/)
+    );
+
+    // Open Rdp Connection
+    if (process.platform === "darwin") {
+      /* Urls by App */
+      const urls: Record<string, string> = {
+        "com.2X.Client.Mac": `tuxclient://?Command=LaunchApp&ConnType=2&Server=${ip}`,
+        "com.microsoft.rdc.macos": `rdp://full%20address=s%3A${ip}`,
+      };
+
+      /* Get Installed App */
+      let apps;
+      try {
+        apps = await getApplications();
+      } catch (error) {
+        if (error instanceof Error) {
+          showToast({ style: Toast.Style.Failure, title: "Error Getting Installed Apps", message: error.message });
+        }
+        return;
+      }
+
+      /* Filter App List */
+      apps = apps.filter((a) => a.bundleId && a.bundleId in urls);
+      if (apps.length === 0) {
+        showToast({
+          style: Toast.Style.Failure,
+          title: "Error with RDP Session",
+          message: "Install 'Windows App' or 'Parallels Client' for this feature",
+        });
+        return;
+      }
+
+      /* Open RDP Session */
+      for (const [app, url] of Object.entries(urls)) {
+        if (apps.findIndex((v) => v.bundleId === app) !== -1) {
+          try {
+            await open(url);
+            showToast({ style: Toast.Style.Success, title: "RDP Session Started" });
+            break;
+          } catch (error) {
+            if (error instanceof Error) {
+              showToast({ style: Toast.Style.Failure, title: "Error with RDP Session", message: error.message });
+            }
+          }
+        }
+      }
+    } else if (process.platform === "win32") {
+      await runPowerShellScript(`Start-Process mstsc /v:${ip}`).catch((err) => {
+        showToast({ style: Toast.Style.Failure, title: "Error with RDP Session", message: err.message });
+      });
+      showToast({ style: Toast.Style.Success, title: "RDP Session Started" });
+    }
+  }
+
+  /**
    * Generate Console Ticket. If the ticket can't be generated it fallback to standard vmrc url requiring authentication.
    * @param {Vm} vm.
    */
@@ -484,22 +558,23 @@ export default function Command(): JSX.Element {
             onAction={() => {
               setShowDetail((prevState) => !prevState);
             }}
+            shortcut={Shortcut.ToggleQuickLook}
           />
           {!IsLoadingVMs && (
             <Action
               title="Refresh"
               icon={Icon.Repeat}
               onAction={() => GetVmInfo(SelectedVM, true)}
-              shortcut={{ modifiers: ["cmd"], key: "r" }}
+              shortcut={Shortcut.Refresh}
             />
           )}
           {vm.vm_info && Server && Server.has(vm.server) && (
             <Action.OpenInBrowser
-              title="Open on vCenter Web"
+              title="Open on Vcenter Web"
               url={`https://${Server.get(vm.server)?.GetFqdn()}/ui/app/vm;nav=v/urn:vmomi:VirtualMachine:${
                 vm.summary.vm
               }:${vm.vm_info.identity?.instance_uuid}/summary`}
-              shortcut={{ modifiers: ["cmd"], key: "b" }}
+              shortcut={Shortcut.OpenInBrowser}
             />
           )}
           {Server && Server.has(vm.server) && (
@@ -507,66 +582,118 @@ export default function Command(): JSX.Element {
               title="Open Console"
               icon={{ source: "icons/vm/console.svg" }}
               onAction={() => VMOpenConsole(vm)}
-              shortcut={{ modifiers: ["cmd"], key: "y" }}
+              shortcut={Shortcut.Open}
             />
           )}
-          {vm.interfaces_info &&
-            vm.interfaces_info.length > 0 &&
-            vm.interfaces_info[0].ip?.ip_addresses &&
-            vm.interfaces_info[0].ip.ip_addresses.length > 0 && (
-              <Action.Open
-                title="Open Rdp"
-                icon={{ source: Icon.Binoculars }}
-                target={`rdp://full%20address=s%3A${vm.interfaces_info[0].ip?.ip_addresses[0].ip_address}`}
-                shortcut={{ modifiers: ["cmd"], key: "u" }}
-              />
-            )}
+          {vm.interfaces_info && (
+            <Action
+              title="Open Rdp"
+              icon={{ source: Icon.Binoculars }}
+              onAction={() => VMOpenRdp(vm.interfaces_info!)}
+              shortcut={Shortcut.OpenWith}
+            />
+          )}
           <Action.CopyToClipboard
             title="Copy Name"
             icon={Icon.Clipboard}
             content={vm.summary.name as string}
-            shortcut={{ modifiers: ["cmd"], key: "n" }}
+            shortcut={Shortcut.CopyName}
           />
           {vm.interfaces_info && vm.interfaces_info.length > 0 && (
             <Action.CopyToClipboard
-              title="Copy IP"
+              title="Copy Ip"
               icon={Icon.Clipboard}
               content={vm.interfaces_info[0].ip?.ip_addresses[0].ip_address as string}
-              shortcut={{ modifiers: ["cmd"], key: "i" }}
+              shortcut={Shortcut.CopyPath}
             />
           )}
-          {Server && Server.has(vm.server) && (
+          {Server && Server.has(vm.server) && vm.vm_info && (
             <ActionPanel.Section title="Power">
-              <Action
-                title="Power On"
-                icon={VMPowerActionIcons.get(VMPowerAction.START)}
-                onAction={() => VMAction(vm, VMPowerAction.START)}
-              />
-              <Action
-                title="Power Off"
-                icon={VMPowerActionIcons.get(VMPowerAction.STOP)}
-                onAction={() => VMAction(vm, VMPowerAction.STOP)}
-              />
-              <Action
-                title="Suspend"
-                icon={VMPowerActionIcons.get(VMPowerAction.SUSPEND)}
-                onAction={() => VMAction(vm, VMPowerAction.SUSPEND)}
-              />
-              <Action
-                title="Reset"
-                icon={VMPowerActionIcons.get(VMPowerAction.RESET)}
-                onAction={() => VMAction(vm, VMPowerAction.RESET)}
-              />
-              <Action
-                title="Shut Down Guest OS"
-                icon={VMGuestPowerActionIcons.get(VMGuestPowerAction.SHUTDOWN)}
-                onAction={() => VMGuestAction(vm, VMGuestPowerAction.SHUTDOWN)}
-              />
-              <Action
-                title="Restart Guest OS"
-                icon={VMGuestPowerActionIcons.get(VMGuestPowerAction.REBOOT)}
-                onAction={() => VMGuestAction(vm, VMGuestPowerAction.REBOOT)}
-              />
+              {vm.vm_info.power_state === VmPowerState.POWERED_ON && (
+                <React.Fragment>
+                  <ActionPanel.Submenu
+                    title="Power Off"
+                    icon={VMPowerActionIcons.get(VMPowerAction.STOP)}
+                    shortcut={Shortcut.TogglePower}
+                  >
+                    <Action
+                      title={`Yes, Power Off "${vm.summary.name}"`}
+                      icon={VMPowerActionIcons.get(VMPowerAction.STOP)}
+                      onAction={() => VMAction(vm, VMPowerAction.STOP)}
+                    />
+                    <Action title="No" icon={Icon.XMarkCircle} />
+                  </ActionPanel.Submenu>
+                  <ActionPanel.Submenu
+                    title="Suspend"
+                    icon={VMPowerActionIcons.get(VMPowerAction.SUSPEND)}
+                    shortcut={Shortcut.Suspend}
+                  >
+                    <Action
+                      title={`Yes, Suspend "${vm.summary.name}"`}
+                      icon={VMPowerActionIcons.get(VMPowerAction.SUSPEND)}
+                      onAction={() => VMAction(vm, VMPowerAction.SUSPEND)}
+                    />
+                    <Action title="No" icon={Icon.XMarkCircle} />
+                  </ActionPanel.Submenu>
+                  <ActionPanel.Submenu
+                    title="Reset"
+                    icon={VMPowerActionIcons.get(VMPowerAction.RESET)}
+                    shortcut={Shortcut.Reset}
+                  >
+                    <Action
+                      title={`Yes, Reset "${vm.summary.name}"`}
+                      icon={VMPowerActionIcons.get(VMPowerAction.RESET)}
+                      onAction={() => VMAction(vm, VMPowerAction.RESET)}
+                    />
+                    <Action title="No" icon={Icon.XMarkCircle} />
+                  </ActionPanel.Submenu>
+                  {vm.interfaces_info && (
+                    <React.Fragment>
+                      <ActionPanel.Submenu
+                        title="Restart Guest Os"
+                        icon={VMGuestPowerActionIcons.get(VMGuestPowerAction.REBOOT)}
+                        shortcut={Shortcut.GuestRestart}
+                      >
+                        <Action
+                          title={`Yes, Restart Guest Os "${vm.summary.name}`}
+                          icon={VMGuestPowerActionIcons.get(VMGuestPowerAction.REBOOT)}
+                          onAction={() => VMGuestAction(vm, VMGuestPowerAction.REBOOT)}
+                        />
+                        <Action title="No" icon={Icon.XMarkCircle} />
+                      </ActionPanel.Submenu>
+                      <ActionPanel.Submenu
+                        title="Shut Down Guest Os"
+                        icon={VMGuestPowerActionIcons.get(VMGuestPowerAction.SHUTDOWN)}
+                        shortcut={Shortcut.GuestShutdown}
+                      >
+                        <Action
+                          title={`Yes, Shut Down Guest Os "${vm.summary.name}"`}
+                          icon={VMGuestPowerActionIcons.get(VMGuestPowerAction.SHUTDOWN)}
+                          onAction={() => VMGuestAction(vm, VMGuestPowerAction.SHUTDOWN)}
+                        />
+                        <Action title="No" icon={Icon.XMarkCircle} />
+                      </ActionPanel.Submenu>
+                    </React.Fragment>
+                  )}
+                </React.Fragment>
+              )}
+              {(vm.vm_info.power_state === VmPowerState.POWERED_OFF ||
+                vm.vm_info.power_state === VmPowerState.SUSPENDED) && (
+                <React.Fragment>
+                  <ActionPanel.Submenu
+                    title="Power On"
+                    icon={VMPowerActionIcons.get(VMPowerAction.START)}
+                    shortcut={Shortcut.TogglePower}
+                  >
+                    <Action
+                      title={`"Yes, Power On "${vm.summary.name}"`}
+                      icon={VMPowerActionIcons.get(VMPowerAction.START)}
+                      onAction={() => VMAction(vm, VMPowerAction.START)}
+                    />
+                    <Action title="No" icon={Icon.XMarkCircle} />
+                  </ActionPanel.Submenu>
+                </React.Fragment>
+              )}
             </ActionPanel.Section>
           )}
           <ActionPanel.Section title="vCenter Server">
@@ -595,9 +722,7 @@ export default function Command(): JSX.Element {
 
     return (
       <ActionPanel title="vCenter VM">
-        {!IsLoadingVMs && (
-          <Action title="Refresh" icon={Icon.Repeat} onAction={GetVMs} shortcut={{ modifiers: ["cmd"], key: "r" }} />
-        )}
+        {!IsLoadingVMs && <Action title="Refresh" icon={Icon.Repeat} onAction={GetVMs} shortcut={Shortcut.Refresh} />}
         <ActionPanel.Section title="vCenter Server">
           {!IsLoadingServerLocalStorage && (
             <Action
